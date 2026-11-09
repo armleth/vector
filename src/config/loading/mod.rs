@@ -1,5 +1,4 @@
 mod config_builder;
-mod ignored_fields;
 pub(crate) mod interpolation;
 mod loader;
 mod representation;
@@ -167,9 +166,14 @@ pub fn process_paths(config_paths: &[ConfigPath]) -> Option<Vec<ConfigPath>> {
 /// interpolated, parsed, merged, or deserialized, or if the resulting configuration fails to
 /// build. Config files that cannot be opened are logged and skipped.
 pub fn load_from_paths(config_paths: &[ConfigPath]) -> Result<Config, Vec<String>> {
-    ConfigBuilderLoader::default()
-        .load_from_paths(config_paths)?
-        .build()
+    let builder = ConfigBuilderLoader::default().load_from_paths(config_paths)?;
+    let (config, build_warnings) = builder.build_with_warnings()?;
+
+    for warning in build_warnings {
+        warn!("{warning}");
+    }
+
+    Ok(config)
 }
 
 /// Loads a configuration from paths. Handle secret replacement and if a provider is present
@@ -195,9 +199,7 @@ pub async fn load_from_paths_with_provider_and_secrets(
 
     // If there's a provider, overwrite the existing config builder with the remote variant.
     if let Some(mut provider) = builder.provider {
-        let bootstrap_warnings = builder.loading_warnings;
         builder = provider.build(signal_handler).await?;
-        builder.loading_warnings.extend(bootstrap_warnings);
         debug!(message = "Provider configured.", provider = ?provider.get_component_name());
     }
 
@@ -259,7 +261,9 @@ async fn finalize_config(builder: ConfigBuilder) -> Result<Config, Vec<String>> 
 
     validation::check_buffer_preconditions(&new_config).await?;
 
-    log_warnings(&build_warnings);
+    for warning in build_warnings {
+        warn!("{warning}");
+    }
 
     Ok(new_config)
 }
@@ -337,27 +341,14 @@ pub fn load_source_from_paths(
 /// Returns error messages if the input cannot be parsed or deserialized, cannot be appended to
 /// the config builder, or if the resulting configuration fails to build.
 pub fn load_from_str(input: &str, format: Format) -> Result<Config, Vec<String>> {
-    load_from_inputs(std::iter::once((input.as_bytes(), format)))?.build()
-}
+    let builder = load_from_inputs(std::iter::once((input.as_bytes(), format)))?;
+    let (config, build_warnings) = builder.build_with_warnings()?;
 
-pub(super) fn log_warnings(warnings: &[String]) {
-    static LAST_WARNINGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-    let mut warnings = warnings.to_vec();
-    warnings.sort_unstable();
-    warnings.dedup();
-
-    let mut previous = LAST_WARNINGS.lock().expect("warning lock poisoned");
-    if *previous == warnings {
-        return;
+    for warning in build_warnings {
+        warn!("{warning}");
     }
-    previous.clone_from(&warnings);
-    drop(previous);
 
-    if !warnings.is_empty() {
-        // Suppress identical reloads, but never hide a changed warning set behind log throttling.
-        warn!(warnings = ?warnings, internal_log_rate_limit = false, "Configuration warnings.");
-    }
+    Ok(config)
 }
 
 fn load_from_inputs(
@@ -367,7 +358,7 @@ fn load_from_inputs(
     let mut errors = Vec::new();
 
     for (input, format) in inputs {
-        if let Err(errs) = load_builder(input, format).and_then(|n| config.append(n)) {
+        if let Err(errs) = load(input, format).and_then(|n| config.append(n)) {
             // TODO: add back paths
             errors.extend(errs.iter().cloned());
         }
@@ -413,22 +404,6 @@ pub fn prepare_input<R: std::io::Read>(
     } else {
         Ok(source_string)
     }
-}
-
-/// Loads a complete configuration, retaining diagnostics before deserialization discards fields.
-pub(crate) fn load_builder(
-    input: impl std::io::Read,
-    format: Format,
-) -> Result<ConfigBuilder, Vec<String>> {
-    let content = prepare_input(input, false)?;
-    let value = representation::parse_config_value(&content, format)?;
-    let ignored = value
-        .as_object()
-        .map(|map| ignored_fields::find(map, None))
-        .unwrap_or_default();
-    let mut builder: ConfigBuilder = representation::deserialize_config_value(value)?;
-    builder.loading_warnings = ignored_fields::warnings(&ignored);
-    Ok(builder)
 }
 
 /// Reads `input` and deserializes it as `T` in the given format, without interpolating

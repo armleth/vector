@@ -5,7 +5,10 @@ use std::{
     pin::Pin,
     time::{Duration, Instant},
 };
-use vector_lib::internal_event::emit;
+use vector_lib::{
+    counter,
+    internal_event::{CounterName, emit},
+};
 
 use async_stream::stream;
 use futures::{Stream, StreamExt, future, stream};
@@ -13,7 +16,7 @@ use indexmap::IndexMap;
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_stream::wrappers::ReceiverStream;
 use vector_lib::{
-    cpu_time::SpawnTimedExt,
+    cpu_time::{CpuTimedExt, SpawnTimedExt},
     stream::expiration_map::{Emitter, map_with_expiration},
 };
 use vector_vrl_metrics::MetricsStorage;
@@ -387,21 +390,26 @@ impl TaskTransform<Event> for ShardedReduce {
 
         let (output_tx, output_rx) =
             mpsc::channel(self.shards.get() * OUTPUT_QUEUE_BATCHES_PER_SHARD);
-        let shards_senders = (0..self.shards.get())
-            .map(|_| {
+        let (shards_senders, shard_events) = (0..self.shards.get())
+            .map(|shard| {
                 let (tx, rx) = mpsc::channel::<Vec<Event>>(SHARD_QUEUE_BATCHES);
-                tasks.spawn_timed(run_shard(
-                    Box::new(self.reduce.clone()),
-                    rx,
-                    output_tx.clone(),
-                ));
-                tx
+                tasks.spawn_timed(
+                    run_shard(Box::new(self.reduce.clone()), rx, output_tx.clone())
+                        .cpu_timed(shard_cpu_counter(&shard.to_string())),
+                );
+                (
+                    tx,
+                    counter!(CounterName::ReduceShardEventsTotal, "shard" => shard.to_string()),
+                )
             })
-            .collect();
+            .unzip();
 
         drop(output_tx);
 
-        tasks.spawn_timed(route(self.reduce.group_by, shards_senders, input_rx));
+        tasks.spawn_timed(
+            route(self.reduce.group_by, shards_senders, shard_events, input_rx)
+                .cpu_timed(shard_cpu_counter("router")),
+        );
 
         stream! {
             let mut output = std::pin::pin!(ReceiverStream::new(output_rx));
@@ -443,9 +451,17 @@ async fn run_shard(
     }
 }
 
+/// BENCH ONLY: per-shard counters, to see how evenly the hash spreads the work across shards.
+///
+/// CPU time of one shard task, or of the router task for `"router"`.
+fn shard_cpu_counter(shard: &str) -> metrics::Counter {
+    counter!(CounterName::ReduceShardCpuUsageNsTotal, "shard" => shard.to_owned())
+}
+
 async fn route(
     group_by: Vec<String>,
     shard_senders: Vec<mpsc::Sender<Vec<Event>>>,
+    shard_events: Vec<metrics::Counter>,
     input_rx: Pin<Box<dyn Stream<Item = Event> + Send>>,
 ) {
     let hasher = RandomState::new();
@@ -473,9 +489,13 @@ async fn route(
 
         let sends = shard_senders
             .iter()
+            .zip(&shard_events)
             .zip(per_shard)
             .filter(|(_, shard_batch)| !shard_batch.is_empty())
-            .map(|(shard_tx, shard_batch)| shard_tx.send(shard_batch));
+            .map(|((shard_tx, events), shard_batch)| {
+                events.increment(shard_batch.len() as u64);
+                shard_tx.send(shard_batch)
+            });
 
         // Fails only if a shard stopped after the output stream was dropped.
         if future::try_join_all(sends).await.is_err() {

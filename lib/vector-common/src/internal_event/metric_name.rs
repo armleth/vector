@@ -110,6 +110,9 @@ pub enum CounterName {
     MemoryEnrichmentTableTtlExpirations,
     MemoryEnrichmentTableTtlExpirationsTotal,
     ComponentCpuUsageNsTotal,
+    // BENCH ONLY: per-shard work of the sharded reduce transform.
+    ReduceShardEventsTotal,
+    ReduceShardCpuUsageNsTotal,
     DatadogLogsEventsTruncatedTotal,
     DatadogLogsReservedAttributeConflictsTotal,
     // Data-plane counter names emitted by the `host_metrics` source.
@@ -495,6 +498,8 @@ impl CounterName {
                 "memory_enrichment_table_ttl_expirations_total"
             }
             Self::ComponentCpuUsageNsTotal => "component_cpu_usage_ns_total",
+            Self::ReduceShardEventsTotal => "reduce_shard_events_total",
+            Self::ReduceShardCpuUsageNsTotal => "reduce_shard_cpu_usage_ns_total",
             Self::DatadogLogsEventsTruncatedTotal => "datadog_logs_events_truncated_total",
             Self::DatadogLogsReservedAttributeConflictsTotal => {
                 "datadog_logs_reserved_attribute_conflicts_total"

@@ -357,7 +357,7 @@ const SHARD_QUEUE_BATCHES: usize = 4;
 
 /// Maximum number of events in a batch sent from the router to a shard, or from a shard to the
 /// output. It bounds each shard queue to `SHARD_QUEUE_BATCHES * BATCH_EVENTS` events.
-pub const BATCH_EVENTS: usize = 100;
+pub const BATCH_EVENTS: usize = 1000;
 
 // All shards send into one shared output channel, which holds
 // `shards * OUTPUT_QUEUE_BATCHES_PER_SHARD` batches. Only there to absorb bursts.
